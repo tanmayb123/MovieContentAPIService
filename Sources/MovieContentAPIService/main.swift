@@ -12,8 +12,7 @@ class SocketSearchHandler {
         var nextPage: Bool
     }
 
-    init(db2Handler: Db2Handler, gotNewSearchResults: @escaping ([Movie]) -> ()) {
-        let movieContent = MovieContent(db2Handler: db2Handler)
+    init(movieContent: MovieContent, gotNewSearchResults: @escaping ([Movie]) -> ()) {
         searchService = MovieSearchService(movieContent: movieContent)
         self.gotNewSearchResults = gotNewSearchResults
         resultsCancellable = searchService.$searchResults
@@ -34,9 +33,9 @@ class SocketSearchHandler {
     }
 }
 
-func registerVaporEndpoints(application: Application, db2Handler: Db2Handler) {
-    application.webSocket("echo") { req, ws in
-        let handler = SocketSearchHandler(db2Handler: db2Handler) { results in
+func registerVaporEndpoints(application: Application, movieContent: MovieContent) {
+    application.webSocket("movie") { req, ws in
+        let handler = SocketSearchHandler(movieContent: movieContent) { results in
             guard results.count > 0 else {
                 return
             }
@@ -47,6 +46,28 @@ func registerVaporEndpoints(application: Application, db2Handler: Db2Handler) {
             handler.new(query: text)
         }
     }
+
+    application.get("genres", ":movieID") { req -> String in
+        guard let movieIDString = req.parameters.get("movieID") else {
+            return "No movieID given"
+        }
+        guard let movieID = Int(movieIDString) else {
+            return "Invalid movieID"
+        }
+
+        let genresString: UnsafeMutablePointer<String> = .allocate(capacity: 1)
+        defer { genresString.deallocate() }
+        let semaphore = DispatchSemaphore(value: 0)
+        async {
+            defer { semaphore.signal() }
+            let movie = try! await movieContent.movie(by: movieID)
+            let genres = try! await movieContent.genres(for: movie)
+            let genresJSON = String(data: try! JSONEncoder().encode(genres), encoding: .utf8)!
+            genresString.pointee = genresJSON
+        }
+        semaphore.wait()
+        return genresString.pointee
+    }
 }
 
 let DB2_AUTH_SETTINGS = Db2Handler.AuthSettings(
@@ -54,10 +75,11 @@ let DB2_AUTH_SETTINGS = Db2Handler.AuthSettings(
     ssl: false, password: "filmdb2pwd", username: "db2inst1", expiryTime: "1h"
 )
 let db2Handler = Db2Handler(authSettings: DB2_AUTH_SETTINGS)
+let movieContent = MovieContent(db2Handler: db2Handler)
 
 var env = try Environment.detect()
 try LoggingSystem.bootstrap(from: &env)
 let app = Application(env)
 defer { app.shutdown() }
-registerVaporEndpoints(application: app, db2Handler: db2Handler)
+registerVaporEndpoints(application: app, movieContent: movieContent)
 try app.run()
