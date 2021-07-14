@@ -2,7 +2,26 @@ import MovieContentService
 import Vapor
 import OpenCombine
 
+class Sessions {
+    static var shared = Sessions()
 
+    private var sessions: [String: MovieContent] = [:]
+    private var semaphore = DispatchSemaphore(value: 1)
+
+    private init() {}
+
+    func session(with id: String) -> MovieContent? {
+        semaphore.wait()
+        defer { semaphore.signal() }
+        return sessions[id]
+    }
+
+    func addSession(with id: String, content: MovieContent) {
+        semaphore.wait()
+        defer { semaphore.signal() }
+        sessions[id] = content
+    }
+}
 
 class SocketSearchHandler {
     private var searchService: MovieSearchService
@@ -35,8 +54,36 @@ class SocketSearchHandler {
     }
 }
 
-func registerVaporEndpoints(application: Application, movieContent: MovieContent) {
+func registerVaporEndpoints(application: Application) {
+    func getSession(from req: Request) -> MovieContent? {
+        guard let sessionId = req.query[String.self, at: "session"] else {
+            return nil
+        }
+        guard let movieContent = Sessions.shared.session(with: sessionId) else {
+            return nil
+        }
+        return movieContent
+    }
+
+    application.get("register") { req -> String in
+        let handler: Db2Handler
+        do {
+            let authSettings = try req.query.decode(Db2Handler.AuthSettings.self)
+            handler = try Db2Handler(authSettings: authSettings)
+        } catch let error {
+            return "Couldn't register. Error: \(error)"
+        }
+        let movieContent = MovieContent(db2Handler: handler)
+        let identifier = UUID().uuidString
+        Sessions.shared.addSession(with: identifier, content: movieContent)
+        return identifier
+    }
+
     application.webSocket("movie") { req, ws in
+        guard let movieContent = getSession(from: req) else {
+            ws.send("Invalid session ID")
+            return
+        }
         let handler = SocketSearchHandler(movieContent: movieContent) { results in
             guard results.count > 0 else {
                 return
@@ -54,6 +101,9 @@ func registerVaporEndpoints(application: Application, movieContent: MovieContent
     }
 
     application.get("genres", ":movieID") { req -> String in
+        guard let movieContent = getSession(from: req) else {
+            return "Invalid session ID"
+        }
         guard let movieIDString = req.parameters.get("movieID") else {
             return "No movieID given"
         }
@@ -80,16 +130,9 @@ func registerVaporEndpoints(application: Application, movieContent: MovieContent
     }
 }
 
-let DB2_AUTH_SETTINGS = Db2Handler.AuthSettings(
-    hostname: "192.168.2.22", database: "movies", dbPort: 50000, restPort: 50050,
-    ssl: false, password: "filmdb2pwd", username: "db2inst1", expiryTime: "1h"
-)
-let db2Handler = Db2Handler(authSettings: DB2_AUTH_SETTINGS)
-let movieContent = MovieContent(db2Handler: db2Handler)
-
 var env = try Environment.detect()
 try LoggingSystem.bootstrap(from: &env)
 let app = Application(env)
 defer { app.shutdown() }
-registerVaporEndpoints(application: app, movieContent: movieContent)
+registerVaporEndpoints(application: app)
 try app.run()
