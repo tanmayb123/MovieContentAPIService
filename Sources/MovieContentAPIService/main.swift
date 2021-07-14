@@ -2,6 +2,8 @@ import MovieContentService
 import Vapor
 import OpenCombine
 
+
+
 class SocketSearchHandler {
     private var searchService: MovieSearchService
     private var gotNewSearchResults: ([Movie]) -> ()
@@ -39,8 +41,12 @@ func registerVaporEndpoints(application: Application, movieContent: MovieContent
             guard results.count > 0 else {
                 return
             }
-            let resultsJSON = try! JSONEncoder().encode(results)
-            ws.send(String(data: resultsJSON, encoding: .utf8)!)
+            do {
+                let resultsJSON = try JSONEncoder().encode(results)
+                ws.send(String(data: resultsJSON, encoding: .utf8)!)
+            } catch let error {
+                ws.send("Couldn't serialize result JSON! Error: \(error)")
+            }
         }
         ws.onText { ws, text in
             handler.new(query: text)
@@ -60,10 +66,14 @@ func registerVaporEndpoints(application: Application, movieContent: MovieContent
         let semaphore = DispatchSemaphore(value: 0)
         async {
             defer { semaphore.signal() }
-            let movie = try! await movieContent.movie(by: movieID)
-            let genres = try! await movieContent.genres(for: movie)
-            let genresJSON = String(data: try! JSONEncoder().encode(genres), encoding: .utf8)!
-            genresString.pointee = genresJSON
+            do {
+                let movie = try await movieContent.movie(by: movieID)
+                let genres = try await movieContent.genres(for: movie)
+                let genresJSON = String(data: try JSONEncoder().encode(genres), encoding: .utf8)!
+                genresString.pointee = genresJSON
+            } catch let error {
+                genresString.pointee = "Couldn't grab genres! Error: \(error)"
+            }
         }
         semaphore.wait()
         return genresString.pointee
